@@ -1,0 +1,14 @@
+[Unit]
+Description=BTC Monitor dashboard (Streamlit)
+After=network-online.target btc-monitor.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__DIR__
+ExecStart=__DIR__/.venv/bin/streamlit run dashboard.py --server.address 127.0.0.1 --server.port 8501 --server.headless true --browser.gatherUsageStats false
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

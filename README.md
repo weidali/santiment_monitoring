@@ -1,0 +1,188 @@
+# BTC Monitor: единая картина сигналов
+
+Собирает рыночные и макро-метрики из бесплатных источников, переводит каждую в сигнал от −1 до +1,
+сводит их в индекс от −100 до +100 и присылает уведомления о важных изменениях.
+Индекс описывает текущее состояние рынка и не предсказывает цену.
+
+Как читать дашборд и что означает каждый сигнал — в [FEATURES.md](FEATURES.md).
+
+## Структура проекта
+
+```
+btc_monitor/
+├── config.py          # настройки: веса, пороги, интервал, рынки Polymarket
+├── sources.py         # сбор данных из API
+├── scoring.py         # сигналы, группы, итоговый индекс, чек-лист импульса
+├── alerts.py          # правила уведомлений и отправка в Telegram
+├── storage.py         # история в SQLite
+├── monitor.py         # основной цикл
+├── dashboard.py       # дашборд на Streamlit
+├── requirements.txt
+├── FEATURES.md        # как читать дашборд и сигналы
+├── .env.example       # шаблон секретов (копируется в .env)
+└── deploy/            # systemd-юниты и скрипт установки на сервер
+```
+
+## 1. Локальный запуск на macOS
+
+Нужен Python 3.10 или новее. Проверьте версию:
+
+```bash
+python3 --version
+```
+
+Если версия ниже 3.10 или команды нет, установите Python через Homebrew:
+
+```bash
+brew install python@3.12
+```
+
+(тогда в командах ниже используйте `python3.12` вместо `python3`).
+
+Распаковка и виртуальное окружение:
+
+```bash
+cd ~/src
+unzip ~/Downloads/btc_monitor.zip
+cd btc_monitor
+
+python3 -m venv .venv            # создать окружение (один раз)
+source .venv/bin/activate        # активировать (в каждом новом окне терминала)
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+После активации в начале строки терминала появится `(.venv)`. Выйти из окружения: `deactivate`.
+
+Настройка секретов (необязательно, нужно только для Telegram):
+
+```bash
+cp .env.example .env
+open -e .env                     # вписать TELEGRAM_TOKEN и TELEGRAM_CHAT_ID
+```
+
+Проверочный прогон:
+
+```bash
+python monitor.py --once
+```
+
+В конце вывода будет блок `!` с источниками, которые не ответили. Пара ошибок допустима,
+индекс считается по тем данным, что пришли.
+
+Постоянная работа — два окна терминала, в каждом сначала `cd ~/src/btc_monitor && source .venv/bin/activate`:
+
+```bash
+# окно 1: сбор данных раз в 15 минут
+python monitor.py
+
+# окно 2: дашборд, откроется http://localhost:8501
+streamlit run dashboard.py
+```
+
+## 2. Публикация в Git
+
+Создайте **приватный** репозиторий на GitHub (или GitLab) без README и .gitignore, затем:
+
+```bash
+cd ~/src/btc_monitor
+git init
+git add .
+git commit -m "BTC monitor: первая версия"
+git branch -M main
+git remote add origin git@github.com:<ваш-логин>/btc_monitor.git
+git push -u origin main
+```
+
+Файлы `.env`, `.venv/` и база `*.sqlite` исключены через `.gitignore` и в репозиторий не попадут.
+Перед первым пушем можно проверить: `git status` не должен показывать `.env`.
+
+Если установлен GitHub CLI, репозиторий можно создать одной командой вместо ручного шага:
+`gh repo create btc_monitor --private --source=. --push`.
+
+## 3. Развёртывание на сервере (Ubuntu / Debian)
+
+```bash
+sudo apt update && sudo apt install -y python3 python3-venv git
+
+cd ~
+git clone git@github.com:<ваш-логин>/btc_monitor.git
+cd btc_monitor
+
+cp .env.example .env && nano .env   # при необходимости
+bash deploy/install.sh
+```
+
+Скрипт создаст `.venv`, установит зависимости и запустит два systemd-сервиса:
+`btc-monitor` (сбор данных) и `btc-dashboard` (дашборд). Оба перезапускаются при сбое и после перезагрузки.
+
+Для `git clone` по SSH на сервере нужен ключ с доступом к репозиторию
+(проще всего — deploy key в настройках репозитория, только чтение).
+
+### Доступ к дашборду
+
+Дашборд слушает только `127.0.0.1:8501` и снаружи не виден: в нём нет авторизации.
+Открывайте его через SSH-туннель с вашего Mac:
+
+```bash
+ssh -L 8501:localhost:8501 <пользователь>@<адрес-сервера>
+```
+
+и затем в браузере `http://localhost:8501`. Если нужен постоянный публичный доступ,
+поставьте перед ним nginx с паролем (basic auth) и HTTPS.
+
+### Управление сервисами
+
+```bash
+sudo systemctl status btc-monitor btc-dashboard
+journalctl -u btc-monitor -f            # живые логи
+sudo systemctl restart btc-monitor btc-dashboard
+sudo systemctl stop btc-monitor btc-dashboard
+```
+
+### Обновление после изменений
+
+На Mac: `git add . && git commit -m "..." && git push`. На сервере:
+
+```bash
+cd ~/btc_monitor
+git pull
+.venv/bin/pip install -r requirements.txt
+sudo systemctl restart btc-monitor btc-dashboard
+```
+
+## Что отслеживается
+
+| Группа (вес) | Метрика | Источник |
+|---|---|---|
+| Потоки денег (40%) | Потоки в спотовые BTC-ETF | Farside (или ручной CSV) |
+| | Coinbase Premium | Coinbase + Binance |
+| | Капитализация стейблкоинов | DefiLlama |
+| Плечо и позиции (20%) | Open interest, funding, их связка с ценой | Binance Futures |
+| Тренд (15%) | Цена против MA50/MA200, объём | Binance |
+| Макро (25%) | DXY, доходность 10Y, Nasdaq, VIX, нефть, USD/JPY | Yahoo Finance |
+| | Чистая ликвидность ФРС (WALCL − TGA − RRP) | FRED |
+| Без влияния на индекс | DVOL (ожидаемая волатильность), Polymarket | Deribit, Polymarket |
+
+Отдельно проверяется чек-лист «подтверждённого импульса»: приток в ETF 3+ дня подряд, положительный
+Coinbase Premium, растущий OI при неперегретом funding, цена выше MA50 на повышенном объёме.
+
+## Настройка
+
+`config.py`: веса групп, пороги сигналов, границы режимов и slug рынков Polymarket
+(берётся из адреса `polymarket.com/event/<slug>`). `.env`: токены Telegram, необязательный ключ FRED и интервал опроса.
+
+## Ограничения
+
+- Binance недоступен с серверов в некоторых странах, в том числе в США и у части облачных провайдеров.
+  Выбирайте сервер в Европе или проверьте доступ командой
+  `curl -s https://fapi.binance.com/fapi/v1/ping` (должно вернуть `{}`).
+- Farside иногда блокирует автоматические запросы, особенно с IP дата-центров. Тогда положите рядом
+  файл `etf_flows_manual.csv` с колонками `date,total_musd` или подключите платный API.
+- Ончейн-данные о резервах бирж и китовых кошельках (CryptoQuant, Glassnode, Arkham) в бесплатном виде
+  почти не доступны через API, поэтому здесь не реализованы.
+- FRED иногда отвечает медленно. Монитор делает три попытки, а при неудаче использует последнее
+  сохранённое значение (данные недельные, так что это безопасно). Бесплатный ключ `FRED_API_KEY`
+  в `.env` делает загрузку быстрее и стабильнее.
+- API-ключи бирж не нужны: все данные берутся из публичных эндпоинтов.
+- Пороги и веса — стартовые значения, а не откалиброванная модель.
