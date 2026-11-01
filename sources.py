@@ -148,44 +148,43 @@ def macro():
 
 
 FRED_CACHE = BASE_DIR / ".fred_cache.json"
-FRED_CACHE_HOURS = 6  # данные ФРС недельные, чаще опрашивать незачем
+FRED_CACHE_HOURS = 6       # данные ФРС недельные, чаще опрашивать незачем
+FRED_RETRY_AFTER_MIN = 60  # после неудачи не дёргать FRED каждые 15 минут
+BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+    "Accept": "text/csv,text/plain,*/*",
+}
 
 
 def _fred(series):
-    """Ряд FRED. С ключом FRED_API_KEY — через официальный API (быстрее и стабильнее),
-    без ключа — через публичный CSV. Берём только последние ~1,5 года, с повторами."""
+    """Ряд FRED. С ключом FRED_API_KEY — через официальный API (рекомендуется),
+    без ключа — через публичный CSV сайта, который часто тормозит для скриптов."""
     start = (pd.Timestamp.today() - pd.Timedelta(days=550)).strftime("%Y-%m-%d")
-    key = os.environ.get("FRED_API_KEY")
-    last_err = None
-    for attempt in range(3):
-        try:
-            if key:
-                r = S.get("https://api.stlouisfed.org/fred/series/observations",
-                          params={"series_id": series, "api_key": key, "file_type": "json",
-                                  "observation_start": start}, timeout=60)
-                r.raise_for_status()
-                obs = r.json()["observations"]
-                df = pd.DataFrame(obs)[["date", "value"]].rename(columns={"value": "v"})
-            else:
-                r = S.get("https://fred.stlouisfed.org/graph/fredgraph.csv",
-                          params={"id": series, "cosd": start}, timeout=60)
-                r.raise_for_status()
-                df = pd.read_csv(io.StringIO(r.text))
-                df.columns = ["date", "v"]
-            df["v"] = pd.to_numeric(df["v"], errors="coerce")
-            df["date"] = pd.to_datetime(df["date"])
-            return df.dropna().set_index("date")["v"]
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            time.sleep(3 * (attempt + 1))
-    raise last_err
+    key = os.environ.get("FRED_API_KEY", "").strip()
+    if key:
+        r = S.get("https://api.stlouisfed.org/fred/series/observations",
+                  params={"series_id": series, "api_key": key, "file_type": "json",
+                          "observation_start": start}, timeout=30)
+        r.raise_for_status()
+        df = pd.DataFrame(r.json()["observations"])[["date", "value"]].rename(columns={"value": "v"})
+    else:
+        r = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv",
+                         params={"id": series, "cosd": start},
+                         headers=BROWSER_HEADERS, timeout=(10, 30))
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+        df.columns = ["date", "v"]
+    df["v"] = pd.to_numeric(df["v"], errors="coerce")
+    df["date"] = pd.to_datetime(df["date"])
+    return df.dropna().set_index("date")["v"]
 
 
 def _read_fred_cache():
     try:
         return json.loads(FRED_CACHE.read_text())
     except Exception:  # noqa: BLE001
-        return None
+        return {}
 
 
 @safe
@@ -194,8 +193,14 @@ def net_liquidity():
     WALCL и WTREGEN в млн $, RRPONTSYD в млрд $. Результат кэшируется: при сбое FRED
     используется последнее успешное значение с пометкой stale."""
     cache = _read_fred_cache()
-    if cache and time.time() - cache["fetched_at"] < FRED_CACHE_HOURS * 3600:
-        return cache["data"]
+    data, now = cache.get("data"), time.time()
+    if data and now - cache.get("fetched_at", 0) < FRED_CACHE_HOURS * 3600:
+        return data
+    if now - cache.get("failed_at", 0) < FRED_RETRY_AFTER_MIN * 60:
+        if data:
+            return {**data, "stale": True}
+        raise RuntimeError(f"FRED недавно не ответил, следующая попытка через "
+                           f"{FRED_RETRY_AFTER_MIN} мин. Добавьте FRED_API_KEY в .env — см. README")
     try:
         walcl = _fred("WALCL")
         tga = _fred("WTREGEN")
@@ -205,11 +210,12 @@ def net_liquidity():
         data = {"net_liq_trn": float(nl.iloc[-1]),
                 "chg_4w_pct": float((nl.iloc[-1] / nl.iloc[-5] - 1) * 100),
                 "as_of": str(nl.index[-1].date())}
-        FRED_CACHE.write_text(json.dumps({"fetched_at": time.time(), "data": data}))
+        FRED_CACHE.write_text(json.dumps({"fetched_at": now, "data": data}))
         return data
     except Exception:
-        if cache:  # FRED недоступен, но есть прошлое значение — оно всё ещё актуально (данные недельные)
-            return {**cache["data"], "stale": True}
+        FRED_CACHE.write_text(json.dumps({**cache, "failed_at": now}))
+        if data:  # данные недельные, прошлое значение всё ещё актуально
+            return {**data, "stale": True}
         raise
 
 
