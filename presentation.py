@@ -1,4 +1,4 @@
-"""Общие для дашборда и iPad-экрана тексты, цвета и расчёты (без зависимости от Streamlit)."""
+"""Общие тексты, цвета и расчёты для веб-экрана (app.py)."""
 from config import GROUP_WEIGHTS, THRESHOLDS as T
 
 BULL, BEAR, NEUTRAL = "#2E8B7A", "#C2533F", "#8A929A"
@@ -134,3 +134,61 @@ def current_value(k, raw):
 def verdict(passed):
     return {4: "импульс подтверждён деньгами", 3: "почти подтверждён", 2: "частично",
             1: "подтверждения нет", 0: "подтверждения нет"}[passed]
+
+
+FNG_RU = {"Extreme Fear": "крайний страх", "Fear": "страх", "Neutral": "нейтрально",
+          "Greed": "жадность", "Extreme Greed": "крайняя жадность"}
+
+
+def dvol_mood(v):
+    return "спокойно" if v < 50 else "оживлённо" if v < 60 else "нервно"
+
+
+SHORT_REGIME = {"Сильный бычий импульс": "сильно бычий", "Умеренно бычий фон": "умеренно бычий",
+                "Нейтрально / нет импульса": "нейтральный", "Умеренно медвежий фон": "умеренно медвежий",
+                "Сильное давление продавцов": "сильно медвежий"}
+REGIME_HOLD = 3  # смена режима засчитывается, если новый режим держится 3 замера подряд (≈45 мин)
+
+
+def derive_events(hist, limit=6):
+    """События восстанавливаются из сохранённой истории замеров, поэтому прошлое не теряется:
+    устойчивые смены режима, подтверждение импульса, перегрев funding, крупные дни по ETF.
+    Возвращает [(ts, направление -1/0/+1, текст)], новые сверху."""
+    ev, prev, etf_seen = [], None, set()
+    hot = 2 * T["funding_hot"]
+    stable, stable_val, cand, cand_n, cand_ts = None, None, None, 0, None
+    for h in hist:
+        sc, raw, ts = h["scored"], h["raw"], h["ts"]
+        reg = sc["regime"]
+        if stable is None:
+            stable, stable_val = reg, sc["composite"]
+        elif reg == stable:
+            cand, cand_n = None, 0
+        else:
+            if reg != cand:
+                cand, cand_n, cand_ts = reg, 0, ts
+            cand_n += 1
+            if cand_n >= REGIME_HOLD:
+                d = 1 if sc["composite"] > stable_val else -1
+                ev.append((cand_ts, d, f"Режим: {SHORT_REGIME.get(stable, stable)} → "
+                                       f"{SHORT_REGIME.get(reg, reg)}"))
+                stable, stable_val, cand, cand_n = reg, sc["composite"], None, 0
+        if prev:
+            psc, praw = prev["scored"], prev["raw"]
+            was, now = psc["confirmed"]["all_passed"], sc["confirmed"]["all_passed"]
+            if now and not was:
+                ev.append((ts, 1, "Импульс подтверждён: все 4 условия"))
+            elif was and not now:
+                ev.append((ts, 0, "Подтверждение импульса пропало"))
+            f0 = praw.get("deriv", {}).get("funding_pct")
+            f1 = raw.get("deriv", {}).get("funding_pct")
+            if f0 is not None and f1 is not None and f0 <= hot < f1:
+                ev.append((ts, -1, f"Funding перегрет: {f1:.3f}%"))
+        etf = raw.get("etf", {})
+        if "last_date" in etf and etf["last_date"] not in etf_seen:
+            etf_seen.add(etf["last_date"])
+            if prev and abs(etf.get("last_day_musd", 0)) >= 500:
+                x = etf["last_day_musd"]
+                ev.append((ts, 1 if x > 0 else -1, f"ETF за день: {x:+,.0f} млн $".replace(",", " ")))
+        prev = h
+    return sorted(ev, key=lambda e: e[0], reverse=True)[:limit]

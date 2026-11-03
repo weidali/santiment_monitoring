@@ -235,6 +235,14 @@ def polymarket():
     return {"markets": markets}
 
 
+@safe
+def fear_greed():
+    """Индекс страха и жадности (alternative.me): настроение крипторынка от 0 до 100. В индекс не входит."""
+    d = _get("https://api.alternative.me/fng/", limit=2).json()["data"]
+    return {"value": int(d[0]["value"]), "label": d[0]["value_classification"],
+            "prev": int(d[1]["value"]) if len(d) > 1 else None}
+
+
 ALL_SOURCES = {
     "trend": price_and_trend,
     "premium": coinbase_premium,
@@ -245,6 +253,7 @@ ALL_SOURCES = {
     "macro": macro,
     "liquidity": net_liquidity,
     "polymarket": polymarket,
+    "fng": fear_greed,
 }
 
 

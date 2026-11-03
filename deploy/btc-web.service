@@ -1,0 +1,16 @@
+[Unit]
+Description=BTC Monitor web (главный экран и подробности)
+After=network-online.target btc-monitor.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__DIR__
+ExecStart=__DIR__/.venv/bin/python app.py --host __HOST__ --port 8600
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
