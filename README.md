@@ -91,7 +91,7 @@ Streamlit на старых iPad не открывается, поэтому д�
 На Mac, в отдельном окне терминала с активированным `.venv`:
 
 ```bash
-caffeinate -dims python kiosk.py
+caffeinate -dims python app.py
 ```
 
 `caffeinate` не даёт Mac уснуть, пока работает экран. Скрипт напечатает адрес вида `http://192.168.1.23:8600`.
@@ -186,16 +186,16 @@ sudo systemctl restart btc-monitor btc-dashboard
 
 ## Что отслеживается
 
-| Группа (вес) | Метрика | Источник |
-|---|---|---|
-| Потоки денег (40%) | Потоки в спотовые BTC-ETF | Farside (или ручной CSV) |
-| | Coinbase Premium | Coinbase + Binance |
-| | Капитализация стейблкоинов | DefiLlama |
-| Плечо и позиции (20%) | Open interest, funding, их связка с ценой | Binance Futures |
-| Тренд (15%) | Цена против MA50/MA200, объём | Binance |
-| Макро (25%) | DXY, доходность 10Y, Nasdaq, VIX, нефть, USD/JPY | Yahoo Finance |
-| | Чистая ликвидность ФРС (WALCL − TGA − RRP) | FRED |
-| Без влияния на индекс | DVOL (ожидаемая волатильность), Polymarket | Deribit, Polymarket |
+| Группа (вес)          | Метрика                                          | Источник                 |
+| --------------------- | ------------------------------------------------ | ------------------------ |
+| Потоки денег (40%)    | Потоки в спотовые BTC-ETF                        | Farside (или ручной CSV) |
+|                       | Coinbase Premium                                 | Coinbase + Binance       |
+|                       | Капитализация стейблкоинов                       | DefiLlama                |
+| Плечо и позиции (20%) | Open interest, funding, их связка с ценой        | Binance Futures          |
+| Тренд (15%)           | Цена против MA50/MA200, объём                    | Binance                  |
+| Макро (25%)           | DXY, доходность 10Y, Nasdaq, VIX, нефть, USD/JPY | Yahoo Finance            |
+|                       | Чистая ликвидность ФРС (WALCL − TGA − RRP)       | FRED                     |
+| Без влияния на индекс | DVOL (ожидаемая волатильность), Polymarket       | Deribit, Polymarket      |
 
 Отдельно проверяется чек-лист «подтверждённого импульса»: приток в ETF 3+ дня подряд, положительный
 Coinbase Premium, растущий OI при неперегретом funding, цена выше MA50 на повышенном объёме.
