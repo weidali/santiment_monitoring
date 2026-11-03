@@ -7,36 +7,9 @@ import pandas as pd
 import streamlit as st
 
 import storage
-from config import GROUP_WEIGHTS, INTERVAL_SECONDS, THRESHOLDS as T
-
-BULL, BEAR, NEUTRAL = "#2E8B7A", "#C2533F", "#8A929A"
-
-GROUPS = {
-    "flows": ("Потоки денег", "Приходят ли реальные деньги: ETF, покупки в США, стейблкоины"),
-    "positioning": ("Плечо", "Чем сделано движение: новыми позициями, сквизом или перегретым плечом"),
-    "trend": ("Тренд", "Цена относительно средних за 50 и 200 дней"),
-    "macro": ("Макро", "Доллар, доходности, акции, страх, нефть, иена, ликвидность ФРС"),
-}
-
-# название, что значит «плюс», что значит «минус»
-SIGNALS = {
-    "etf": ("ETF-потоки", "деньги идут в биткоин-ETF", "деньги уходят из биткоин-ETF"),
-    "premium": ("Coinbase Premium", "американцы покупают активнее остальных", "американцы продают"),
-    "stables": ("Стейблкоины", "в крипту заходят новые доллары", "доллары выходят из крипты"),
-    "leverage": ("Структура плеча", "рост идёт на новых позициях", "позиции давят цену вниз"),
-    "funding": ("Funding", "плечо не перегрето", "лонги перегреты, риск пролива"),
-    "trend": ("Тренд", "цена выше средних", "цена ниже средних"),
-    "dxy": ("Доллар (DXY)", "доллар слабеет", "доллар крепнет"),
-    "us10y": ("Доходность 10Y", "доходности снижаются", "доходности растут"),
-    "nasdaq": ("Nasdaq", "акции растут", "акции падают"),
-    "vix": ("VIX", "на рынке спокойно", "на рынке страх"),
-    "oil": ("Нефть", "нефть не давит", "нефть дорожает"),
-    "yen": ("Иена", "иена спокойна", "иена резко крепнет"),
-    "liquidity": ("Ликвидность ФРС", "ликвидности становится больше", "ликвидность сокращается"),
-}
-
-ZONES = [(-100, -40, BEAR, .28), (-40, -15, BEAR, .14), (-15, 15, NEUTRAL, .2),
-         (15, 40, BULL, .14), (40, 100, BULL, .28)]
+from config import GROUP_WEIGHTS, INTERVAL_SECONDS
+from presentation import (BULL, NEUTRAL, GROUPS, SIGNALS, NEUTRAL_TXT, ZONES,
+                          color, summary, checklist_rows, current_value, verdict)
 
 st.set_page_config(page_title="BTC: единая картина", page_icon="₿", layout="wide")
 st.markdown("""
@@ -54,12 +27,29 @@ st.markdown("""
 .check:last-child {border-bottom: none;}
 .check b {font-weight: 600;}
 .check small {opacity: .7;}
+.tbl-wrap {overflow-x: auto; margin: .25rem 0 1.5rem;}
+table.bd {width: 100%; min-width: 760px; border-collapse: collapse; table-layout: fixed; font-size: .92rem;}
+table.bd col.c-name {width: 21%;} table.bd col.c-now {width: 29%;}
+table.bd col.c-score {width: 22%;} table.bd col.c-mean {width: 28%;}
+table.bd th {text-align: left; font-weight: 500; font-size: .8rem; opacity: .65; padding: .5rem .75rem;
+             border-bottom: 2px solid rgba(128,128,128,.35);}
+table.bd th small {opacity: .8; font-weight: 400;}
+table.bd td {padding: .45rem .75rem; border-bottom: 1px solid rgba(128,128,128,.15); vertical-align: middle;}
+table.bd tr.grp td {background: rgba(128,128,128,.08); border-top: 1px solid rgba(128,128,128,.3);
+                    padding-top: .65rem; padding-bottom: .65rem;}
+table.bd tr.grp td b {display: block; font-size: 1rem;}
+table.bd tr.grp small, table.bd td small {opacity: .65; font-size: .8rem;}
+table.bd td.sig {padding-left: 1.6rem;}
+table.bd td.now {font-variant-numeric: tabular-nums; opacity: .85;}
+table.bd td.mean {opacity: .85;}
+.barcell {display: flex; align-items: center; gap: .6rem;}
+.track {position: relative; flex: 1; height: 10px; border-radius: 5px; background: rgba(128,128,128,.12);}
+.track.strong {height: 14px; border-radius: 7px;}
+.track .axis {position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: rgba(128,128,128,.6);}
+.track .fill {position: absolute; top: 0; bottom: 0; border-radius: 3px;}
+.barcell .num {flex: none; width: 3.2rem; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums;}
 .dot {flex: none; width: .7rem; height: .7rem; border-radius: 50%; transform: translateY(1px);}
 </style>""", unsafe_allow_html=True)
-
-
-def color(v):
-    return BULL if v > 0.15 else BEAR if v < -0.15 else NEUTRAL
 
 
 def gauge(value, regime):
@@ -74,92 +64,50 @@ def gauge(value, regime):
     <div class="gauge-scale"><span>−100 продавцы</span><span>0</span><span>покупатели +100</span></div>"""
 
 
-def summary(sc):
-    """Человеческое резюме: что сильнее всего тянет вверх и вниз с учётом весов."""
-    counts = {}
-    for s in sc["signals"].values():
-        counts[s["group"]] = counts.get(s["group"], 0) + 1
-    contrib = []
-    for k, s in sc["signals"].items():
-        if s["value"] is None or k not in SIGNALS:
-            continue
-        w = GROUP_WEIGHTS[s["group"]] / counts[s["group"]]
-        contrib.append((s["value"] * w, k, s["value"]))
-    ups = [SIGNALS[k][1] for c, k, v in sorted(contrib, reverse=True) if v > 0.2][:2]
-    downs = [SIGNALS[k][2] for c, k, v in sorted(contrib) if v < -0.2][:2]
-    lines = []
-    if ups:
-        lines.append("**За рост:** " + "; ".join(ups) + ".")
-    if downs:
-        lines.append("**Против:** " + "; ".join(downs) + ".")
-    if not lines:
-        lines.append("Сильных сигналов нет ни в одну сторону.")
-    return lines
+def bar(v, strong=False):
+    """Расходящаяся полоса −1…+1 с подписью значения."""
+    w = min(abs(v), 1) * 50
+    c = color(v)
+    side = f"left:50%;width:{w:.1f}%" if v >= 0 else f"left:{50 - w:.1f}%;width:{w:.1f}%"
+    fill = f'<span class="fill" style="{side};background:{c}"></span>' if w >= 1 else \
+           f'<span class="fill" style="left:calc(50% - 1.5px);width:3px;background:{c}"></span>'
+    return (f'<div class="barcell"><div class="track{" strong" if strong else ""}">'
+            f'<span class="axis"></span>{fill}</div>'
+            f'<span class="num" style="color:{c}">{v:+.2f}</span></div>')
 
 
-def checklist_rows(raw):
-    etf, pr, dv, tr = (raw.get(k, {}) for k in ("etf", "premium", "deriv", "trend"))
-    rows = []
-
-    def add(ok, title, now, need):
-        rows.append((bool(ok), title, now, need))
-
-    if "streak_days" in etf:
-        add(etf["streak_days"] >= 3, "Приток в ETF несколько дней подряд",
-            f"серия {etf['streak_days']:+d} дн.", "нужно 3+ дня притоков")
-    else:
-        add(False, "Приток в ETF несколько дней подряд", "нет данных", "нужно 3+ дня притоков")
-    if "premium_pct" in pr:
-        add(pr["premium_pct"] > 0, "Американцы покупают", f"премия {pr['premium_pct']:+.3f}%",
-            "нужна премия выше 0")
-    else:
-        add(False, "Американцы покупают", "нет данных", "нужна премия выше 0")
-    if "oi_chg_24h_pct" in dv:
-        add(dv["oi_chg_24h_pct"] > 0 and dv["funding_pct"] < T["funding_hot"],
-            "Новые позиции без перегрева",
-            f"OI {dv['oi_chg_24h_pct']:+.1f}% за сутки, funding {dv['funding_pct']:.3f}%",
-            f"нужен рост OI и funding ниже {T['funding_hot']}%")
-    else:
-        add(False, "Новые позиции без перегрева", "нет данных", "нужен рост OI при спокойном funding")
-    if "price" in tr:
-        add(tr["price"] > tr["ma50"] and tr["vol_ratio"] > 1.2, "Пробой с объёмом",
-            f"цена {'выше' if tr['price'] > tr['ma50'] else 'ниже'} MA50, объём x{tr['vol_ratio']:.1f}",
-            "нужна цена выше MA50 и объём x1.2+")
-    else:
-        add(False, "Пробой с объёмом", "нет данных", "нужна цена выше MA50 и объём x1.2+")
-    return rows
-
-
-def group_chart(sc, g):
-    """Полосы сигналов одной группы: от −1 (против роста) до +1 (за рост)."""
-    gname = GROUPS[g][0]
-    rows = []
-    for k in SIGNALS:  # фиксированный порядок
-        sig = sc["signals"].get(k)
-        if not sig or sig["group"] != g or sig["value"] is None:
-            continue
-        v = sig["value"]
-        rows.append({"Группа": gname, "Сигнал": SIGNALS[k][0], "Значение": v, "Детали": sig["comment"],
-                     "Смысл": SIGNALS[k][1] if v > 0.15 else SIGNALS[k][2] if v < -0.15 else "нейтрально",
-                     "c": color(v), "Подпись": f"{v:+.1f}"})
-    if not rows:
-        return None
-    df = pd.DataFrame(rows)
-    base = alt.Chart(df).encode(
-        y=alt.Y("Сигнал:N", sort=df["Сигнал"].tolist(), title=None,
-                axis=alt.Axis(labelLimit=150, ticks=False, domain=False, labelFontSize=12)),
-        tooltip=["Сигнал", alt.Tooltip("Значение:Q", format="+.2f"), "Смысл", "Детали"])
-    x = alt.X("Значение:Q", scale=alt.Scale(domain=[-1.25, 1.25]), title=None,
-              axis=alt.Axis(values=[-1, 0, 1], format="+.0f", grid=True, labelFontSize=10))
-    bars = base.mark_bar(cornerRadius=3, height=12).encode(x=x, color=alt.Color("c:N", scale=None))
-    ticks = base.mark_tick(thickness=3, size=12).encode(x=x, color=alt.Color("c:N", scale=None))
-    zero = base.mark_rule(opacity=.45).encode(x=alt.datum(0))
-    lab_pos = base.mark_text(fontSize=11, fontWeight="bold", align="left", dx=6).encode(
-        x=x, text="Подпись:N", color=alt.Color("c:N", scale=None)).transform_filter("datum['Значение'] >= 0")
-    lab_neg = base.mark_text(fontSize=11, fontWeight="bold", align="right", dx=-6).encode(
-        x=x, text="Подпись:N", color=alt.Color("c:N", scale=None)).transform_filter("datum['Значение'] < 0")
-    return alt.layer(zero, bars, ticks, lab_pos, lab_neg).properties(
-        height=alt.Step(24)).configure_view(stroke=None)
+def breakdown_table(sc, raw, prev_sc):
+    from html import escape
+    out = ['<div class="tbl-wrap"><table class="bd"><colgroup><col class="c-name"><col class="c-now">'
+           '<col class="c-score"><col class="c-mean"></colgroup>'
+           '<thead><tr><th>Сигнал</th><th>Сейчас</th><th>Оценка <small>−1 … +1</small></th>'
+           '<th>Что это значит</th></tr></thead><tbody>']
+    for g, (gname, hint) in GROUPS.items():
+        v = sc["groups"].get(g)
+        delta = '<small>без изменений за сутки</small>' if prev_sc else '<small>нет данных за сутки</small>'
+        if v is not None and prev_sc and prev_sc["groups"].get(g) is not None:
+            dd = v - prev_sc["groups"][g]
+            if abs(dd) >= 0.01:
+                delta = (f'<span style="color:{color(dd * 3)}">{"▲" if dd > 0 else "▼"} '
+                         f'{dd:+.2f} за сутки</span>')
+        out.append(
+            f'<tr class="grp"><td><b>{gname}</b><small>вес {GROUP_WEIGHTS[g]:.0%}</small></td>'
+            f'<td>{delta}</td>'
+            f'<td>{bar(v, strong=True) if v is not None else "нет данных"}</td>'
+            f'<td><small>{escape(hint)}</small></td></tr>')
+        for k, (label, pos, neg) in SIGNALS.items():
+            sig = sc["signals"].get(k)
+            if not sig or sig["group"] != g or sig["value"] is None:
+                continue
+            sv = sig["value"]
+            if k == "leverage":
+                meaning = sig["comment"][:1].lower() + sig["comment"][1:]
+            else:
+                meaning = pos if sv > 0.15 else neg if sv < -0.15 else NEUTRAL_TXT.get(k, "нейтрально")
+            out.append(f'<tr><td class="sig">{label}</td><td class="now">{escape(current_value(k, raw))}</td>'
+                       f'<td>{bar(sv)}</td><td class="mean">{escape(meaning)}</td></tr>')
+    out.append("</tbody></table></div>")
+    return "".join(out)
 
 
 def history_chart(hist):
@@ -222,9 +170,7 @@ st.divider()
 # ---------- чек-лист ----------
 rows = checklist_rows(raw)
 passed = sum(r[0] for r in rows)
-verdict = {4: "импульс подтверждён деньгами", 3: "почти подтверждён", 2: "частично",
-           1: "подтверждения нет", 0: "подтверждения нет"}[passed]
-st.subheader(f"Подтверждение импульса: {passed} из 4 — {verdict}")
+st.subheader(f"Подтверждение импульса: {passed} из 4 — {verdict(passed)}")
 st.caption("Настоящее движение поддерживают одновременно деньги, позиции и цена. "
            "Одно-два условия из четырёх — чаще шум или короткий сквиз.")
 html = ""
@@ -238,23 +184,9 @@ st.divider()
 
 # ---------- группы ----------
 st.subheader("Откуда взялась оценка")
-st.caption("Каждая полоса — один сигнал от −1 (против роста) до +1 (за рост). "
-           "Наведите на полосу, чтобы увидеть пояснение. Подробно о сигналах — в FEATURES.md.")
-keys = list(GROUPS)
-for pair in (keys[:2], keys[2:]):
-    for col, g in zip(st.columns(2, gap="large"), pair):
-        name, hint = GROUPS[g]
-        v = sc["groups"].get(g)
-        delta = None
-        if v is not None and prev_sc and prev_sc["groups"].get(g) is not None:
-            dd = v - prev_sc["groups"][g]
-            delta = f"{dd:+.2f} за сутки" if abs(dd) >= 0.01 else None
-        with col:
-            st.metric(f"{name} · вес {GROUP_WEIGHTS[g]:.0%}",
-                      "нет данных" if v is None else f"{v:+.2f}", delta, help=hint)
-            ch = group_chart(sc, g)
-            if ch is not None:
-                st.altair_chart(ch, width="stretch")
+st.caption("Строка группы — её итоговая оценка и изменение за сутки, ниже — сигналы, из которых она сложилась. "
+           "Зелёный — за рост, красный — против, серый — нейтрально. Подробно о сигналах — в FEATURES.md.")
+st.markdown(breakdown_table(sc, raw, prev_sc), unsafe_allow_html=True)
 
 # ---------- детали во вкладках ----------
 tab_hist, tab_vol, tab_src = st.tabs(["История", "Волатильность и прогнозы", "Источники данных"])
