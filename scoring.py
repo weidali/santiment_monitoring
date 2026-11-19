@@ -99,8 +99,26 @@ def score(raw):
     coverage = len(group_scores) / len(GROUP_WEIGHTS)
 
     return {"composite": round(composite, 1) + 0.0, "regime": regime, "confirmed": confirmed,
-            "coverage": coverage, "groups": group_scores,
+            "coverage": coverage, "groups": group_scores, "background": background_for(raw),
             "signals": {k: {"group": g, "value": v, "comment": c} for k, (g, v, c) in sig.items()}}
+
+
+def background_for(raw):
+    """Медленный макро-фон: считается отдельно и в индекс не входит (см. background.py)."""
+    if not any(k.startswith("bg_") for k in raw):
+        return None
+    import time
+
+    import background
+    import storage
+    dom_ago = None
+    try:
+        old = storage.last(1, before_ts=int(time.time()) - 30 * 86400)
+        if old:
+            dom_ago = old[0]["raw"].get("bg_structure", {}).get("btc_dom")
+    except Exception:  # noqa: BLE001
+        pass
+    return background.score_background(raw, dom_ago)
 
 
 def confirmation(raw):

@@ -258,4 +258,7 @@ ALL_SOURCES = {
 
 
 def collect_all():
-    return {name: fn() for name, fn in ALL_SOURCES.items()}
+    out = {name: fn() for name, fn in ALL_SOURCES.items()}
+    from macro_sources import BG_SOURCES  # медленный макро-фон, с кэшем на диске
+    out.update({name: fn() for name, fn in BG_SOURCES.items()})
+    return out

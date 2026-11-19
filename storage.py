@@ -39,3 +39,33 @@ def history(days=30):
         rows = c.execute("SELECT ts, composite, raw, scored FROM snapshots WHERE ts >= ? ORDER BY ts",
                          (since,)).fetchall()
     return [{"ts": r[0], "composite": r[1], "raw": json.loads(r[2]), "scored": json.loads(r[3])} for r in rows]
+
+
+def prune(keep_full_days=1, thin_after_days=14):
+    """Не даёт базе разрастаться:
+    — в замерах старше суток убирает то, что нужно только для текущего экрана
+      (календарь, подробные строки фоновых маркеров), состояния и цифры остаются;
+    — замеры старше двух недель прореживает до одного в час.
+    Вызывается из monitor.py несколько раз в сутки."""
+    now = int(time.time())
+    slim_before, thin_before = now - keep_full_days * 86400, now - thin_after_days * 86400
+    with conn() as c:
+        rows = c.execute("SELECT ts, raw, scored FROM snapshots WHERE ts < ? AND "
+                         "(raw LIKE '%\"bg_calendar\"%' OR scored LIKE '%\"rows\"%')", (slim_before,)).fetchall()
+        for ts, raw_s, sc_s in rows:
+            raw, sc = json.loads(raw_s), json.loads(sc_s)
+            raw.pop("bg_calendar", None)
+            for m in ((sc.get("background") or {}).get("markers") or {}).values():
+                for k in ("rows", "notes", "meaning", "next"):
+                    m.pop(k, None)
+            c.execute("UPDATE snapshots SET raw = ?, scored = ? WHERE ts = ?",
+                      (json.dumps(raw, default=str), json.dumps(sc, default=str), ts))
+        cur = c.execute("DELETE FROM snapshots WHERE ts < ? AND ts NOT IN "
+                        "(SELECT MIN(ts) FROM snapshots WHERE ts < ? GROUP BY ts / 3600)",
+                        (thin_before, thin_before))
+        deleted = cur.rowcount
+    if deleted > 500:
+        c = sqlite3.connect(DB_PATH)
+        c.execute("VACUUM")
+        c.close()
+    return len(rows), deleted

@@ -191,4 +191,103 @@ def derive_events(hist, limit=6):
                 x = etf["last_day_musd"]
                 ev.append((ts, 1 if x > 0 else -1, f"ETF за день: {x:+,.0f} млн $".replace(",", " ")))
         prev = h
+    ev += background_events(hist)
     return sorted(ev, key=lambda e: e[0], reverse=True)[:limit]
+
+
+MONTHS = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь",
+          "ноябрь", "декабрь"]
+
+
+def _price(h):
+    return (h["raw"].get("trend") or {}).get("price")
+
+
+def btc_reaction(hist, ts):
+    """Как BTC отреагировал на событие: за сутки после него или с тех пор, если сутки не прошли."""
+    before = [h for h in hist if h["ts"] <= ts and _price(h)]
+    after = [h for h in hist if h["ts"] >= ts + 86400 and _price(h)]
+    if not before:
+        return ""
+    p0 = _price(before[-1])
+    if after:
+        return f" · BTC за сутки после: {(_price(after[0]) / p0 - 1) * 100:+.1f}%"
+    latest = [h for h in hist if _price(h)]
+    if latest and latest[-1]["ts"] > ts:
+        return f" · BTC с тех пор: {(_price(latest[-1]) / p0 - 1) * 100:+.1f}%"
+    return ""
+
+
+def background_events(hist):
+    """События медленного фона: смена состояния маркеров, выход отчёта по рынку труда,
+    решения ФРС, новые квартальные отчёты ИИ-компаний. У событий-точек проверки — реакция BTC."""
+    from background import MARKERS, STATES
+    from config import FOMC_DECISIONS
+    import macro_sources
+
+    ev = []
+    order = {"ok": 0, "warn": 1, "stress": 2}
+    stable, cand = {}, {}
+    prev = None
+    for h in hist:
+        ts, raw = h["ts"], h["raw"]
+        markers = ((h["scored"].get("background") or {}).get("markers") or {})
+        for k, m in markers.items():
+            st = m.get("state")
+            if st not in order:
+                continue
+            if k not in stable:
+                stable[k] = st
+            elif st == stable[k]:
+                cand.pop(k, None)
+            else:
+                c = cand.get(k)
+                if not c or c[0] != st:
+                    c = cand[k] = [st, 0, ts]
+                c[1] += 1
+                if c[1] >= REGIME_HOLD:
+                    d = 1 if order[st] < order[stable[k]] else -1
+                    ev.append((c[2], d, f"{MARKERS[k][0]}: {STATES[stable[k]]} → {STATES[st]}"))
+                    stable[k] = st
+                    cand.pop(k, None)
+        if prev:
+            lab0, lab1 = prev["raw"].get("bg_labor") or {}, raw.get("bg_labor") or {}
+            if lab0.get("as_of") and lab1.get("as_of") and lab1["as_of"] > lab0["as_of"] \
+                    and lab1.get("unrate") is not None:
+                mon = MONTHS[int(lab1["as_of"][5:7]) - 1]
+                dun = lab1["unrate"] - (lab0.get("unrate") or lab1["unrate"])
+                txt = f"Рынок труда за {mon}: безработица {lab1['unrate']:.1f}% ({dun:+.1f})"
+                if lab1.get("payrolls_3m_k") is not None:
+                    txt += f", {lab1['payrolls_3m_k']:+.0f} тыс. мест/мес."
+                ev.append((ts, -1 if dun > 0.05 else 1 if dun < -0.05 else 0, txt + btc_reaction(hist, ts)))
+            a0 = (prev["raw"].get("bg_ai") or {}).get("companies") or {}
+            a1 = (raw.get("bg_ai") or {}).get("companies") or {}
+            for tic, c in a1.items():
+                old = a0.get(tic) or {}
+                if c.get("filed") and old.get("filed") and c["filed"] > old["filed"]:
+                    g = (c["revenue"] / c["revenue_prev"] - 1) * 100 if c.get("revenue") and c.get("revenue_prev") \
+                        else None
+                    txt = f"Отчёт {tic}" + ("" if g is None else f": выручка за год {g:+.0f}%")
+                    ev.append((ts, 0, txt + btc_reaction(hist, ts)))
+        prev = h
+    # решения ФРС: время из расписания, итог — по изменению ставки по резервам (IORB)
+    if hist:
+        t0, t1 = hist[0]["ts"], hist[-1]["ts"]
+        for day, decision in FOMC_DECISIONS:
+            if not decision:
+                continue
+            ts = macro_sources.ny_ts(day, "14:00")
+            if not t0 <= ts <= t1:
+                continue
+            before = [(h["raw"].get("bg_rates") or {}).get("iorb") for h in hist if h["ts"] <= ts]
+            after = [(h["raw"].get("bg_rates") or {}).get("iorb") for h in hist if h["ts"] >= ts + 30 * 3600]
+            before, after = [x for x in before if x is not None], [x for x in after if x is not None]
+            if before and after:
+                bp = round((after[-1] - before[-1]) * 100)
+                txt = ("ФРС оставила ставку без изменений" if bp == 0 else
+                       f"ФРС {'снизила' if bp < 0 else 'повысила'} ставку на {abs(bp)} б.п.")
+                d = 1 if bp < 0 else -1 if bp > 0 else 0
+            else:
+                txt, d = "Решение ФРС по ставке", 0
+            ev.append((ts, d, txt + btc_reaction(hist, ts)))
+    return ev

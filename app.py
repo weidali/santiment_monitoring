@@ -5,6 +5,7 @@
 
 Страницы:
   /         главный экран: живая цена, индекс, чек-лист, события, настроение, группы сигналов
+  /macro    макро-фон: шесть маркеров (норма / внимание / стресс) и календарь точек проверки
   /details  подробности: история индекса и цены, все сигналы с фактическими значениями,
             Polymarket, статус источников данных
 
@@ -26,7 +27,8 @@ from urllib.parse import parse_qs, urlparse
 import requests
 
 import storage
-from config import GROUP_WEIGHTS, INTERVAL_SECONDS, USER_AGENT
+from background import MARKERS, MEANING, STATES, upcoming
+from config import GROUP_WEIGHTS, INTERVAL_SECONDS, ROTATE_SECONDS, USER_AGENT
 from presentation import (GROUPS, SIGNALS, NEUTRAL_TXT, ZONES, FNG_RU, summary, checklist_rows,
                           current_value, verdict, derive_events, dvol_mood)
 
@@ -36,6 +38,11 @@ PAGE_RELOAD_MIN = 5    # как часто главный экран подтя�
 DETAILS_IDLE_MIN = 3   # через сколько минут без касаний «Подробнее» возвращается на главный экран
 
 UP, DOWN, FLAT = "#3DBE9A", "#E5674F", "#8E8E93"
+WARN = "#E8B04A"
+STATE_COLOR = {"ok": UP, "warn": WARN, "stress": DOWN, "nodata": FLAT}
+SHORT_MARKER = {"labor": "Труд", "rates": "Ставки", "dollar": "Доллар", "credit": "Кредит", "ai": "ИИ",
+                "structure": "Структура"}
+WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 
 SHORT_TITLES = {
     "Приток в ETF несколько дней подряд": "ETF: приток 3+ дня",
@@ -43,11 +50,34 @@ SHORT_TITLES = {
     "Новые позиции без перегрева": "Позиции без перегрева",
 }
 
+def ev_when(e):
+    """«ср 09.12, 22:00» в местном времени компьютера; для ориентировочных дат — «≈ 28.01»."""
+    t = datetime.fromtimestamp(e["ts"])
+    if e.get("approx"):
+        return f"≈ {t:%d.%m}"
+    return f"{WEEKDAYS[t.weekday()]} {t:%d.%m}, {t:%H:%M}"
+
+
+def countdown(ts):
+    left = ts - time.time()
+    if left < 0:
+        return "прошло"
+    days = (datetime.fromtimestamp(ts).date() - datetime.now().date()).days
+    if days == 0:
+        return f"через {left / 3600:.0f} ч" if left >= 3600 else f"через {max(left / 60, 1):.0f} мин"
+    if days == 1:
+        return "завтра"
+    return f"через {days} дн."
+
+
 SOURCE_NAMES = {
     "trend": "Цена и тренд · Binance", "premium": "Coinbase Premium", "deriv": "Деривативы · Binance",
     "dvol": "DVOL · Deribit", "stables": "Стейблкоины · DefiLlama", "etf": "ETF-потоки · Farside",
     "macro": "Макро · Yahoo", "liquidity": "Ликвидность ФРС · FRED", "polymarket": "Polymarket",
     "fng": "Страх и жадность · alternative.me",
+    "bg_labor": "Фон: рынок труда · FRED", "bg_rates": "Фон: ставки · FRED", "bg_dollar": "Фон: доллар · FRED",
+    "bg_credit": "Фон: кредит · FRED", "bg_ai": "Фон: ИИ-компании · SEC EDGAR",
+    "bg_structure": "Фон: структура · Yahoo, CoinGecko", "bg_calendar": "Календарь · ФРС, FRED",
 }
 
 
@@ -245,11 +275,15 @@ def render_main():
         cls = "grp compact" if len(sigs) > 4 else "grp"
         cells.append(f'<div class="{cls}"><div class="in">{head}{"".join(sigs)}</div></div>')
 
+    strip = bg_strip(sc, raw)
+    errors = [k for k in errors if not k.startswith("bg_")]  # ошибки фона видны на экране «Фон»
+
     foot = [f"Монитор: {when(snap['ts'])}"]
     if age_min > 2.5 * INTERVAL_SECONDS / 60:
         foot.append(f'<span style="color:{DOWN}">данные устарели на {age_min:.0f} мин</span>')
     if errors:
         foot.append(f'<span style="color:{DOWN}">ошибки: {", ".join(errors)}</span>')
+    foot.append('<span class="link" data-go="/macro">Фон ›</span>')
     foot.append('<span class="link" data-go="/details">Подробнее ›</span>')
 
     body = f"""
@@ -277,8 +311,88 @@ def render_main():
       <div class="card mood">{mood_html}</div>
     </div>
     <div class="row4 groups">{"".join(cells)}</div>
+    {strip}
     <div class="foot"><span id="clock"></span> · {" · ".join(foot)}</div>"""
     return page("BTC", MAIN_CSS, body, MAIN_JS)
+
+
+def bg_strip(sc, raw):
+    """Компактная полоса фона на главном экране: шесть маркеров и ближайшая важная точка проверки."""
+    bg = sc.get("background")
+    if not bg:
+        return ('<div class="bgstrip" data-go="/macro"><span class="bl">Фон</span>'
+                '<span class="bx">появится после следующего замера monitor.py</span></div>')
+    chips = "".join(
+        f'<span class="chip"><i style="background:{STATE_COLOR[m["state"]]}"></i>{SHORT_MARKER[k]}</span>'
+        for k, m in bg["markers"].items())
+    nxt = upcoming(raw, None, limit=20)
+    nxt = [e for e in nxt if e.get("imp", 0) >= 2][:1]
+    nx = (f'<span class="nx"><b>{escape(nxt[0]["title"])}</b> · {ev_when(nxt[0])} · {countdown(nxt[0]["ts"])}</span>'
+          if nxt else "")
+    return (f'<div class="bgstrip" data-go="/macro"><span class="bl" style="color:{STATE_COLOR[bg["state"]]}">'
+            f'{escape(bg["label"])}</span>{chips}{nx}<span class="arr">›</span></div>')
+
+
+# ================================================================ экран «Фон»
+def marker_card(k, m, raw):
+    name = MARKERS[k][0]
+    col = STATE_COLOR[m["state"]]
+    rows = "".join(
+        f'<div class="mr"><i style="background:{FLAT if r["score"] is None else kcolor(r["score"])}"></i>'
+        f'<span class="ml">{escape(r["label"])}</span><span class="mv">{escape(r["value"])}</span></div>'
+        for r in m.get("rows", [])[:5])
+    note = ""
+    notes = m.get("notes") or []
+    if notes:
+        note = f'<div class="mn" style="color:{WARN if m["state"] != "ok" else "#aeaeb2"}">{escape(notes[0])}</div>'
+    if m.get("error"):
+        note = f'<div class="mn" style="color:{DOWN}">{escape(m["error"])}</div>'
+    meaning = MEANING[k].get(m["state"], "")
+    nxt = m.get("next")
+    nxt_html = (f'<div class="mx">Проверка: {escape(nxt["title"])} · {ev_when(nxt)}</div>' if nxt else "")
+    stale = ' <small>(из кэша)</small>' if m.get("stale") else ""
+    return (f'<div class="mc"><div class="in" style="border-top-color:{col}">'
+            f'<div class="mh"><b>{name}</b><span class="pill2" style="background:{col}">'
+            f'{STATES[m["state"]]}</span></div>'
+            f'<div class="mhl">{escape(m.get("headline") or "")}{stale}</div>{rows}{note}'
+            f'<div class="mm">{escape(meaning)}</div>{nxt_html}</div></div>')
+
+
+def render_macro():
+    loaded = load()
+    if not loaded:
+        return page("BTC · фон", MACRO_CSS, EMPTY, MACRO_JS)
+    snap, _ = loaded
+    sc, raw = snap["scored"], snap["raw"]
+    bg = sc.get("background")
+    head = (f'<div class="bar"><span class="back" data-go="/">‹ Рынок</span>'
+            f'<b>Макро-фон{": " + escape(bg["label"].replace("Фон ", "")) if bg else ""}</b>'
+            f'<span class="mini"><span id="mprice">—</span> <span id="mchg"></span> · <span id="clock"></span></span></div>')
+    if not bg:
+        return page("BTC · фон", MACRO_CSS, head + '<div class="empty">Фон появится после следующего замера '
+                    'monitor.py.</div>', MACRO_JS)
+    cards = "".join(marker_card(k, m, raw) for k, m in bg["markers"].items())
+    events = upcoming(raw, None, limit=10, since_hours=6)
+
+    def item(e, i):
+        cls = "ce i%d%s" % (e.get("imp", 1), " more" if i >= 6 else "")
+        return (f'<div class="{cls}"><span class="cw">{ev_when(e)}</span>'
+                f'<span class="ct">{escape(e["title"])}</span><span class="cc">{countdown(e["ts"])}</span></div>')
+    half = (len(events) + 1) // 2  # две колонки, каждая по порядку дат
+    items = [f'<div class="ccol">{"".join(item(e, i) for i, e in enumerate(events[:half]))}</div>',
+             f'<div class="ccol">{"".join(item(e, i + half) for i, e in enumerate(events[half:]))}</div>'] \
+        if events else []
+    cal = raw.get("bg_calendar") or {}
+    miss = ""
+    if isinstance(cal, dict) and cal.get("missing"):
+        miss = '<small>Без FRED_API_KEY часть дат публикаций недоступна, отчёт по рынку труда — ориентировочно.</small>'
+    if isinstance(cal, dict) and cal.get("error"):
+        miss = f'<small style="color:{DOWN}">Календарь: {escape(cal["error"])}</small>'
+    body = f"""{head}
+    <div class="row3">{cards}</div>
+    <div class="card cal"><div class="label">Точки проверки <span class="tz">время местное</span></div>
+      <div class="cl">{"".join(items) or '<div class="noev">Нет ближайших событий.</div>'}</div>{miss}</div>"""
+    return page("BTC · фон", MACRO_CSS, body, MACRO_JS)
 
 
 # ================================================================ экран «Подробнее»
@@ -433,7 +547,7 @@ MAIN_CSS = """
 body {-webkit-user-select:none;}
 .row {font-size:0; margin-bottom:10px;}
 .row > .card {display:inline-block; vertical-align:top; font-size:15px; margin:0;}
-.top > .card {height:262px; overflow:hidden;}
+.top > .card {height:252px; overflow:hidden;}
 .top .price {width:34%; margin-right:1%;}
 .top .index {width:38%; margin-right:1%;}
 .top .events {width:26%;}
@@ -452,7 +566,7 @@ body {-webkit-user-select:none;}
 #price.down {color:%DOWN%; -webkit-transition:none;}
 .pill {position:absolute; right:0; top:10px; min-width:84px; text-align:center; padding:6px 8px;
   border-radius:6px; font-size:16px; font-weight:500; color:#fff; background:#555; cursor:pointer;}
-#spark {display:block; width:100%; height:120px; margin-top:6px;}
+#spark {display:block; width:100%; height:112px; margin-top:4px;}
 .hl {font-size:13px; color:#8e8e93; margin-top:6px;}
 .hl span {margin-right:16px;}
 .hl b {color:#f2f2f7;}
@@ -493,7 +607,7 @@ body {-webkit-user-select:none;}
 .m .ml small {font-size:12px;}
 
 .groups {margin-bottom:6px;}
-.grp .in {background:#1c1c1e; border-radius:12px; padding:10px 12px 6px; height:306px; overflow:hidden;}
+.grp .in {background:#1c1c1e; border-radius:12px; padding:10px 12px 6px; height:290px; overflow:hidden;}
 .grp.compact .sig small {display:none;}
 .grp.compact .sig {margin-bottom:6px;}
 .gh {height:24px; position:relative;}
@@ -504,6 +618,15 @@ body {-webkit-user-select:none;}
 .sl {height:17px; position:relative; font-size:13px; color:#d1d1d6;}
 .sl em {position:absolute; right:0; top:0; font-style:normal; font-weight:500;}
 .sig small {display:block; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.bgstrip {background:#1c1c1e; border-radius:10px; height:34px; line-height:34px; padding:0 12px; margin-bottom:6px;
+  font-size:13px; white-space:nowrap; overflow:hidden; position:relative;}
+.bgstrip .bl {font-weight:700; margin-right:12px;}
+.bgstrip .bx {color:#8e8e93;}
+.bgstrip .chip {margin-right:12px; color:#d1d1d6;}
+.bgstrip .chip i {display:inline-block; width:8px; height:8px; border-radius:4px; margin-right:5px;}
+.bgstrip .nx {position:absolute; right:30px; top:0; color:#aeaeb2; background:#1c1c1e; padding-left:10px;}
+.bgstrip .nx b {color:#f2f2f7; font-weight:500;}
+.bgstrip .arr {position:absolute; right:12px; top:0; color:#5E9BFF; font-size:18px;}
 .foot {font-size:12px; color:#636366; text-align:center; padding-top:2px;}
 .foot .link {color:#5E9BFF;}
 
@@ -518,7 +641,9 @@ body {-webkit-user-select:none;}
   .checks .row4 > div {width:50%; margin-bottom:6px;}
   .checks .chk .in {height:46px; padding:6px 8px;}
   .chk small {margin-top:1px;}
-  .grp .in {height:340px; padding:10px 10px 6px;}
+  .grp .in {height:330px; padding:10px 10px 6px;}
+  .bgstrip .nx {display:none;}
+  .bgstrip .chip {margin-right:9px;}
   .grp .sig {margin-bottom:9px;}
   .sig small {display:none;}
   .sig {margin-bottom:6px;}
@@ -556,6 +681,69 @@ table.src td {padding:6px 4px; border-bottom:1px solid #2c2c2e; font-size:13px;}
 table.src td.note {color:#8e8e93; font-size:12px; word-break:break-all;}
 @media (orientation: portrait) { .row2 > div {width:100%;} }
 """
+
+MACRO_CSS = """
+body {-webkit-user-select:none;}
+.bar {height:38px; position:relative; text-align:center; font-size:17px; line-height:38px; margin-bottom:6px;}
+.bar .back {position:absolute; left:0; top:0; color:#5E9BFF; font-size:17px;}
+.bar .mini {position:absolute; right:0; top:0; font-size:14px; color:#aeaeb2;}
+.bar #mprice {color:#f2f2f7; font-weight:500;}
+.row3 {font-size:0; margin:0 -5px;}
+.mc {display:inline-block; vertical-align:top; width:33.333%; padding:0 5px 10px; font-size:14px;}
+.mc .in {background:#1c1c1e; border-radius:12px; padding:10px 12px 8px; height:242px; overflow:hidden;
+  border-top:3px solid #333;}
+.mh {height:24px; position:relative;}
+.mh b {font-size:16px; font-weight:700;}
+.pill2 {position:absolute; right:0; top:0; font-size:12px; color:#000; padding:2px 8px; border-radius:5px;
+  font-weight:700;}
+.mhl {font-size:15px; color:#fff; margin:2px 0 6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.mhl small {font-size:11px;}
+.mr {position:relative; height:19px; font-size:12px; line-height:19px; padding-left:12px; white-space:nowrap;}
+.mr i {position:absolute; left:0; top:6px; width:7px; height:7px; border-radius:4px;}
+.mr .ml {color:#aeaeb2;}
+.mr .mv {position:absolute; right:0; top:0; color:#f2f2f7; background:#1c1c1e; padding-left:6px;}
+.mn {font-size:11px; line-height:1.3; margin-top:4px; max-height:29px; overflow:hidden;}
+.mm {font-size:12px; color:#8e8e93; line-height:1.3; margin-top:4px; max-height:47px; overflow:hidden;}
+.mx {font-size:11px; color:#5E9BFF; margin-top:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.cal {margin-bottom:4px;}
+.cal .tz {float:right; font-size:11px;}
+.cl {font-size:0;}
+.ccol {display:inline-block; vertical-align:top; width:50%;}
+.ce {font-size:13px; height:26px; line-height:26px;
+  position:relative; padding:0 12px 0 110px; white-space:nowrap; overflow:hidden; border-bottom:1px solid #2c2c2e;}
+.ce .cw {position:absolute; left:0; top:0; color:#aeaeb2; font-size:12px;}
+.ce .ct {display:block; overflow:hidden; text-overflow:ellipsis; padding-right:78px;}
+.ce .cc {position:absolute; right:12px; top:0; color:#8e8e93; font-size:12px;}
+.ce.i3 .ct {color:#fff; font-weight:700;}
+.ce.i2 .ct {color:#f2f2f7;}
+.ce.i1 .ct {color:#8e8e93;}
+@media (orientation: portrait) {
+  .mc {width:50%;}
+  .mc .in {height:236px;}
+  .ccol {display:block; width:100%;}
+  .ce.more {display:none;}
+}
+"""
+
+MACRO_JS = """
+(function () {
+  function fmt(n) { return n.toFixed(0).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ','); }
+  function poll() {
+    get('/api/price', function (t) {
+      var d; try { d = JSON.parse(t); } catch (e) { return; }
+      if (!d.ok || !$('mprice')) return;
+      $('mprice').innerHTML = 'BTC $' + fmt(d.price);
+      var c = $('mchg');
+      c.innerHTML = (d.chg_pct >= 0 ? '+' : '−') + Math.abs(d.chg_pct).toFixed(2) + '%';
+      c.style.color = d.chg_pct >= 0 ? '%UP%' : '%DOWN%';
+    }, function () {});
+  }
+  poll(); setInterval(poll, %PRICE_MS%);
+  if (%ROTATE_MS% > 0) { setTimeout(function () { go('/'); }, %ROTATE_MS%); }
+  else { setInterval(function () { go('/macro'); }, %RELOAD_MS%); }
+})();
+""".replace("%PRICE_MS%", str(PRICE_EVERY * 1000)).replace("%RELOAD_MS%", str(PAGE_RELOAD_MIN * 60000)) \
+   .replace("%ROTATE_MS%", str(ROTATE_SECONDS * 1000))
 
 # ES5: без let/const, стрелочных функций, fetch и шаблонных строк
 COMMON_JS = """
@@ -647,9 +835,11 @@ MAIN_JS = """
     $('pill').onclick = function (e) { mode = mode === 'pct' ? 'abs' : 'pct'; pill(); };
     poll(); setInterval(poll, %PRICE_MS%);
   }
-  setInterval(function () { go('/'); }, %RELOAD_MS%);
+  if (%ROTATE_MS% > 0) { setTimeout(function () { go('/macro'); }, %ROTATE_MS%); }
+  else { setInterval(function () { go('/'); }, %RELOAD_MS%); }
 })();
-""".replace("%PRICE_MS%", str(PRICE_EVERY * 1000)).replace("%RELOAD_MS%", str(PAGE_RELOAD_MIN * 60000))
+""".replace("%PRICE_MS%", str(PRICE_EVERY * 1000)).replace("%RELOAD_MS%", str(PAGE_RELOAD_MIN * 60000)) \
+   .replace("%ROTATE_MS%", str(ROTATE_SECONDS * 1000))
 
 DETAILS_JS = """
 (function () {
@@ -677,6 +867,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if u.path == "/":
                 self._send(200, render_main(), "text/html; charset=utf-8")
+            elif u.path == "/macro":
+                self._send(200, render_macro(), "text/html; charset=utf-8")
             elif u.path == "/details":
                 try:
                     days = int(parse_qs(u.query).get("days", ["7"])[0])
